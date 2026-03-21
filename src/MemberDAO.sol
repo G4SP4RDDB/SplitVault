@@ -3,6 +3,11 @@ pragma solidity ^0.8.24;
 
 import "./SplitVault.sol";
 
+/// @dev Minimal interface so MemberDAO can call ENSManager without importing it.
+interface IENSManager {
+    function registerSubname(address addr, string calldata label) external;
+}
+
 /// @title MemberDAO
 /// @notice Governs the addition of new members to SplitVault via on-chain majority voting.
 ///
@@ -20,10 +25,14 @@ contract MemberDAO {
     // Types
     // -------------------------------------------------------------------------
 
+    enum ProposalType { AddMember, Repartition }
+
     struct Proposal {
+        ProposalType proposalType;
         address proposer;
-        address newMember;
-        uint256[] newPercentages;    // full redistribution: existing members + new one (last)
+        address newMember;           // address(0) for Repartition proposals
+        string  label;               // ENS subdomain label for the new member ("" for Repartition)
+        uint256[] newPercentages;    // currentCount+1 for AddMember, currentCount for Repartition
         uint256 deadline;            // voting closes at this timestamp
         uint256 yesVotes;
         uint256 noVotes;
@@ -35,8 +44,10 @@ contract MemberDAO {
     // State
     // -------------------------------------------------------------------------
 
-    SplitVault public immutable vault;
-    uint256    public immutable votingDuration; // in seconds
+    SplitVault   public immutable vault;
+    uint256      public immutable votingDuration; // in seconds
+    /// @dev Optional ENS manager — address(0) disables subname registration.
+    IENSManager  public immutable ensManager;
 
     uint256 public proposalCount;
 
@@ -61,6 +72,11 @@ contract MemberDAO {
         uint256 indexed proposalId,
         address indexed proposer,
         address indexed newMember,
+        uint256 deadline
+    );
+    event RepartitionProposed(
+        uint256 indexed proposalId,
+        address indexed proposer,
         uint256 deadline
     );
     event VoteCast(uint256 indexed proposalId, address indexed voter, bool support);
@@ -98,9 +114,11 @@ contract MemberDAO {
 
     /// @param _vault          Address of the SplitVault this DAO governs.
     /// @param _votingDuration Duration of the voting window in seconds (e.g. 1 days).
-    constructor(address payable _vault, uint256 _votingDuration) {
-        vault = SplitVault(_vault);
+    /// @param _ensManager     Address of the ENSManager contract (address(0) = no ENS).
+    constructor(address payable _vault, uint256 _votingDuration, address _ensManager) {
+        vault          = SplitVault(_vault);
         votingDuration = _votingDuration;
+        ensManager     = IENSManager(_ensManager);
     }
 
     // -------------------------------------------------------------------------
@@ -116,7 +134,8 @@ contract MemberDAO {
     /// @return proposalId     ID of the newly created proposal.
     function proposeMember(
         address newMember,
-        uint256[] calldata newPercentages
+        uint256[] calldata newPercentages,
+        string  calldata label
     ) external onlyMember returns (uint256 proposalId) {
         (address[] memory current,) = vault.getMembers();
         uint256 currentCount = current.length;
@@ -132,13 +151,41 @@ contract MemberDAO {
         proposalId = proposalCount++;
 
         Proposal storage p = _proposals[proposalId];
+        p.proposalType        = ProposalType.AddMember;
         p.proposer            = msg.sender;
         p.newMember           = newMember;
+        p.label               = label;
         p.newPercentages      = newPercentages;
         p.deadline            = block.timestamp + votingDuration;
         p.snapshotMemberCount = currentCount;
 
         emit ProposalCreated(proposalId, msg.sender, newMember, p.deadline);
+    }
+
+    /// @notice Opens a vote to change the percentage shares of existing members.
+    /// @param newPercentages  New shares for ALL current members (same order, same length).
+    ///                        Must sum to 100, no zeros. Validated by SplitVault on execution.
+    /// @return proposalId     ID of the newly created proposal.
+    function proposeRepartition(
+        uint256[] calldata newPercentages
+    ) external onlyMember returns (uint256 proposalId) {
+        (address[] memory current,) = vault.getMembers();
+        uint256 currentCount = current.length;
+
+        // Must provide exactly one percentage per existing member
+        if (newPercentages.length != currentCount) revert ArrayLengthMismatch();
+
+        proposalId = proposalCount++;
+
+        Proposal storage p = _proposals[proposalId];
+        p.proposalType        = ProposalType.Repartition;
+        p.proposer            = msg.sender;
+        // p.newMember stays address(0)
+        p.newPercentages      = newPercentages;
+        p.deadline            = block.timestamp + votingDuration;
+        p.snapshotMemberCount = currentCount;
+
+        emit RepartitionProposed(proposalId, msg.sender, p.deadline);
     }
 
     // -------------------------------------------------------------------------
@@ -207,9 +254,18 @@ contract MemberDAO {
             return;
         }
 
-        // Quorum reached — delegate to SplitVault (which validates sum, duplicates, etc.)
+        // Quorum reached — delegate to SplitVault based on proposal type
         emit ProposalPassed(proposalId, p.newMember);
-        vault.addMember(p.newMember, p.newPercentages);
+
+        if (p.proposalType == ProposalType.AddMember) {
+            vault.addMember(p.newMember, p.newPercentages);
+            // Register the ENS subname if an ENSManager has been wired up
+            if (address(ensManager) != address(0)) {
+                ensManager.registerSubname(p.newMember, p.label);
+            }
+        } else {
+            vault.updateShares(p.newPercentages);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -220,6 +276,7 @@ contract MemberDAO {
         external
         view
         returns (
+            ProposalType proposalType,
             address proposer,
             address newMember,
             uint256[] memory newPercentages,
@@ -227,12 +284,14 @@ contract MemberDAO {
             uint256 yesVotes,
             uint256 noVotes,
             bool executed,
-            uint256 snapshotMemberCount
+            uint256 snapshotMemberCount,
+            string memory label
         )
     {
         if (proposalId >= proposalCount) revert ProposalNotFound();
         Proposal storage p = _proposals[proposalId];
         return (
+            p.proposalType,
             p.proposer,
             p.newMember,
             p.newPercentages,
@@ -240,7 +299,8 @@ contract MemberDAO {
             p.yesVotes,
             p.noVotes,
             p.executed,
-            p.snapshotMemberCount
+            p.snapshotMemberCount,
+            p.label
         );
     }
 

@@ -4,10 +4,20 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../src/SplitVault.sol";
 import "../src/MemberDAO.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract MockUSDC is ERC20 {
+    constructor() ERC20("USD Coin", "USDC") {}
+    function decimals() public pure override returns (uint8) { return 6; }
+    function mint(address to, uint256 amount) external { _mint(to, amount); }
+}
 
 contract MemberDAOTest is Test {
+    MockUSDC   usdc;
     SplitVault vault;
     MemberDAO  dao;
+
+    uint256 constant USDC = 1_000_000; // 1 USDC in raw units
 
     address alice   = makeAddr("alice");
     address bob     = makeAddr("bob");
@@ -22,16 +32,17 @@ contract MemberDAOTest is Test {
     uint256[] davePcts;
 
     function setUp() public {
-        // Deploy vault: alice 50%, bob 30%, charlie 20%
+        // Deploy token + vault: alice 50%, bob 30%, charlie 20%
+        usdc = new MockUSDC();
         address[] memory addrs = new address[](3);
         uint256[] memory pcts  = new uint256[](3);
         addrs[0] = alice;   pcts[0] = 50;
         addrs[1] = bob;     pcts[1] = 30;
         addrs[2] = charlie; pcts[2] = 20;
-        vault = new SplitVault(addrs, pcts);
+        vault = new SplitVault(address(usdc), addrs, pcts);
 
-        // Deploy DAO and hand over vault ownership
-        dao = new MemberDAO(payable(address(vault)), VOTING_DURATION);
+        // Deploy DAO and hand over vault ownership (no ENSManager in base tests)
+        dao = new MemberDAO(payable(address(vault)), VOTING_DURATION, address(0));
         vault.transferOwnership(address(dao));
 
         // Reusable percentages array for adding dave
@@ -46,7 +57,7 @@ contract MemberDAOTest is Test {
     /// Open a proposal as alice and return its id.
     function _propose(address candidate, uint256[] memory pcts) internal returns (uint256) {
         vm.prank(alice);
-        return dao.proposeMember(candidate, pcts);
+        return dao.proposeMember(candidate, pcts, "dave");
     }
 
     /// alice votes yes, bob votes yes (2/3 = 66.7% — passes quorum).
@@ -73,7 +84,7 @@ contract MemberDAOTest is Test {
         assertEq(id, 0);
         assertEq(dao.proposalCount(), 1);
 
-        (address proposer, address newMember,,,,, bool executed, uint256 snap) =
+        (, address proposer, address newMember,,,,, bool executed, uint256 snap,) =
             dao.getProposal(0);
 
         assertEq(proposer,   alice);
@@ -85,13 +96,13 @@ contract MemberDAOTest is Test {
     function test_RevertIf_ProposeMember_NotMember() public {
         vm.prank(outsider);
         vm.expectRevert(MemberDAO.NotAMember.selector);
-        dao.proposeMember(dave, davePcts);
+        dao.proposeMember(dave, davePcts, "dave");
     }
 
     function test_RevertIf_ProposeMember_AlreadyMember() public {
         vm.prank(alice);
         vm.expectRevert(MemberDAO.NewMemberAlreadyExists.selector);
-        dao.proposeMember(alice, davePcts); // alice is already in the vault
+        dao.proposeMember(alice, davePcts, "alice"); // alice is already in the vault
     }
 
     function test_RevertIf_ProposeMember_WrongArrayLength() public {
@@ -100,7 +111,7 @@ contract MemberDAOTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(MemberDAO.ArrayLengthMismatch.selector);
-        dao.proposeMember(dave, badPcts);
+        dao.proposeMember(dave, badPcts, "dave");
     }
 
     // =========================================================================
@@ -116,7 +127,7 @@ contract MemberDAOTest is Test {
         vm.prank(alice);
         dao.vote(id, true);
 
-        (,,,,uint256 yesVotes, uint256 noVotes,,) = dao.getProposal(id);
+        (,,,,,uint256 yesVotes, uint256 noVotes,,,) = dao.getProposal(id);
         assertEq(yesVotes, 1);
         assertEq(noVotes,  0);
         assertTrue(dao.hasVoted(id, alice));
@@ -128,7 +139,7 @@ contract MemberDAOTest is Test {
         vm.prank(bob);
         dao.vote(id, false);
 
-        (,,,, uint256 yesVotes, uint256 noVotes,,) = dao.getProposal(id);
+        (,,,,, uint256 yesVotes, uint256 noVotes,,,) = dao.getProposal(id);
         assertEq(yesVotes, 0);
         assertEq(noVotes,  1);
     }
@@ -332,13 +343,15 @@ contract MemberDAOTest is Test {
         assertEq(addrs[3], dave);    assertEq(pcts[3], 20);
 
         // Step 6 — fund and distribute with the new split
-        vm.deal(address(vault), 100 ether);
+        usdc.mint(address(this), 100 * USDC);
+        usdc.approve(address(vault), 100 * USDC);
+        vault.deposit(100 * USDC);
         vault.distribute();
 
-        assertEq(alice.balance,   40 ether);
-        assertEq(bob.balance,     25 ether);
-        assertEq(charlie.balance, 15 ether);
-        assertEq(dave.balance,    20 ether);
+        assertEq(usdc.balanceOf(alice),   40 * USDC);
+        assertEq(usdc.balanceOf(bob),     25 * USDC);
+        assertEq(usdc.balanceOf(charlie), 15 * USDC);
+        assertEq(usdc.balanceOf(dave),    20 * USDC);
     }
 
     // =========================================================================
@@ -380,6 +393,110 @@ contract MemberDAOTest is Test {
         // The original deployer (this test contract) also cannot
         vm.expectRevert(SplitVault.NotOwner.selector);
         vault.addMember(dave, davePcts);
+    }
+
+    // =========================================================================
+    // proposeRepartition
+    // =========================================================================
+
+    function test_ProposeRepartition() public {
+        // alice proposes: alice 60%, bob 25%, charlie 15%
+        uint256[] memory newPcts = new uint256[](3);
+        newPcts[0] = 60; newPcts[1] = 25; newPcts[2] = 15;
+
+        vm.expectEmit(true, true, false, false);
+        emit MemberDAO.RepartitionProposed(0, alice, 0);
+
+        vm.prank(alice);
+        uint256 id = dao.proposeRepartition(newPcts);
+
+        assertEq(id, 0);
+        (MemberDAO.ProposalType pType,,,,,,,,, ) = dao.getProposal(id);
+        assertEq(uint256(pType), uint256(MemberDAO.ProposalType.Repartition));
+    }
+
+    function test_RevertIf_ProposeRepartition_NotMember() public {
+        uint256[] memory newPcts = new uint256[](3);
+        newPcts[0] = 60; newPcts[1] = 25; newPcts[2] = 15;
+
+        vm.prank(outsider);
+        vm.expectRevert(MemberDAO.NotAMember.selector);
+        dao.proposeRepartition(newPcts);
+    }
+
+    function test_RevertIf_ProposeRepartition_WrongArrayLength() public {
+        uint256[] memory newPcts = new uint256[](4); // should be 3
+        newPcts[0] = 40; newPcts[1] = 30; newPcts[2] = 20; newPcts[3] = 10;
+
+        vm.prank(alice);
+        vm.expectRevert(MemberDAO.ArrayLengthMismatch.selector);
+        dao.proposeRepartition(newPcts);
+    }
+
+    function test_ExecuteRepartition_Passes() public {
+        uint256[] memory newPcts = new uint256[](3);
+        newPcts[0] = 60; newPcts[1] = 25; newPcts[2] = 15;
+
+        vm.prank(alice);
+        uint256 id = dao.proposeRepartition(newPcts);
+
+        _twoYesVotes(id);
+        _warpPastDeadline();
+        dao.executeProposal(id);
+
+        (, uint256[] memory pcts) = vault.getMembers();
+        assertEq(pcts[0], 60);
+        assertEq(pcts[1], 25);
+        assertEq(pcts[2], 15);
+    }
+
+    function test_ExecuteRepartition_Rejected() public {
+        uint256[] memory newPcts = new uint256[](3);
+        newPcts[0] = 60; newPcts[1] = 25; newPcts[2] = 15;
+
+        vm.prank(alice);
+        uint256 id = dao.proposeRepartition(newPcts);
+
+        // Only 1/3 votes yes — rejected
+        vm.prank(alice);
+        dao.vote(id, true);
+
+        _warpPastDeadline();
+
+        vm.expectEmit(true, false, false, false);
+        emit MemberDAO.ProposalRejected(id);
+        dao.executeProposal(id);
+
+        // Shares must be unchanged
+        (, uint256[] memory pcts) = vault.getMembers();
+        assertEq(pcts[0], 50);
+        assertEq(pcts[1], 30);
+        assertEq(pcts[2], 20);
+    }
+
+    function test_FullFlow_Repartition() public {
+        uint256[] memory newPcts = new uint256[](3);
+        newPcts[0] = 60; newPcts[1] = 25; newPcts[2] = 15;
+
+        vm.prank(alice);
+        uint256 id = dao.proposeRepartition(newPcts);
+
+        vm.prank(alice);   dao.vote(id, true);
+        vm.prank(bob);     dao.vote(id, true);
+        vm.prank(charlie); dao.vote(id, false);
+
+        _warpPastDeadline();
+        dao.executeProposal(id);
+
+        // Distribute and verify new split
+        usdc.mint(address(this), 100 * USDC);
+        usdc.approve(address(vault), 100 * USDC);
+        vault.deposit(100 * USDC);
+        vault.distribute();
+
+        assertEq(usdc.balanceOf(alice),   60 * USDC);
+        assertEq(usdc.balanceOf(bob),     25 * USDC);
+        assertEq(usdc.balanceOf(charlie), 15 * USDC);
     }
 
     // =========================================================================
