@@ -35,15 +35,13 @@ contract Deploy is Script {
         SplitVault vault = new SplitVault(USDC, addrs, pcts);
         console.log("SplitVault :", address(vault));
 
-        // 2. Deploy MemberDAO (1-day voting window, wired to ENSManager below)
-        //    ENSManager address is set after deployment — use address(0) for now
-        //    and update with setAuthorizedCaller after ENSManager is deployed.
-        MemberDAO dao = new MemberDAO(payable(address(vault)), 1 days, address(0));
-        console.log("MemberDAO  :", address(dao));
-
-        // 3. Deploy ENSManager
+        // 2. Deploy ENSManager first — its address is needed by MemberDAO (immutable)
         ENSManager ens = new ENSManager(ENS_REGISTRY, ENS_RESOLVER, VAULT_NODE);
         console.log("ENSManager :", address(ens));
+
+        // 3. Deploy MemberDAO wired to ENSManager
+        MemberDAO dao = new MemberDAO(payable(address(vault)), 1 days, address(ens));
+        console.log("MemberDAO  :", address(dao));
 
         // 4. Wire everything together
         ens.setAuthorizedCaller(address(dao));
