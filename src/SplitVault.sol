@@ -175,6 +175,16 @@ contract SplitVault {
     }
 
     // -------------------------------------------------------------------------
+    // Ownership
+    // -------------------------------------------------------------------------
+
+    /// @notice Transfers vault ownership to a new address (e.g. MemberDAO).
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        owner = newOwner;
+    }
+
+    // -------------------------------------------------------------------------
     // View helpers
     // -------------------------------------------------------------------------
 
