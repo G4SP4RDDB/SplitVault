@@ -47,7 +47,8 @@ contract MemberDAO {
     SplitVault   public immutable vault;
     uint256      public immutable votingDuration; // in seconds
     /// @dev Optional ENS manager — address(0) disables subname registration.
-    IENSManager  public immutable ensManager;
+    ///      Mutable so it can be set after deployment (e.g. via VaultFactory flow).
+    IENSManager  public ensManager;
 
     uint256 public proposalCount;
 
@@ -108,6 +109,7 @@ contract MemberDAO {
         _;
     }
 
+
     // -------------------------------------------------------------------------
     // Constructor
     // -------------------------------------------------------------------------
@@ -119,6 +121,17 @@ contract MemberDAO {
         vault          = SplitVault(_vault);
         votingDuration = _votingDuration;
         ensManager     = IENSManager(_ensManager);
+    }
+
+    // -------------------------------------------------------------------------
+    // ENS configuration
+    // -------------------------------------------------------------------------
+
+    /// @notice Sets or updates the ENSManager after deployment.
+    ///         Callable by any current vault member so the DAO can wire ENS later
+    ///         without redeploying. Pass address(0) to disable.
+    function setENSManager(address _ensManager) external onlyMember {
+        ensManager = IENSManager(_ensManager);
     }
 
     // -------------------------------------------------------------------------
