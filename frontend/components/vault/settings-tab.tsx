@@ -45,7 +45,7 @@ export function SettingsTab({ vaultAddress, daoAddress, isMember }: Props) {
         abi:          MEMBER_DAO_ABI,
         functionName: "setENSManager",
         args:         [newEnsManager as `0x${string}`],
-        chainId:      sepolia.id,
+        chain:        sepolia,
       });
       await new Promise((r) => setTimeout(r, 4000));
       setNewEnsManager("");

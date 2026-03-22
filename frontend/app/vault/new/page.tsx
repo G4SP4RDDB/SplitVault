@@ -1,16 +1,16 @@
 "use client";
 
-import { useState }      from "react";
+import { useState, useEffect } from "react";
 import { useRouter }     from "next/navigation";
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract } from "wagmi";
 import { isAddress }     from "viem";
 import {
-  ADDRESSES, VAULT_FACTORY_ABI,
+  ADDRESSES, VAULT_FACTORY_ABI, ENS_MANAGER_ABI,
   VOTING_DURATION_OPTIONS,
 } from "@/lib/contracts";
 import { sepolia } from "wagmi/chains";
 
-type Step = "members" | "duration" | "review";
+type Step = "name" | "members" | "duration" | "review";
 
 interface MemberEntry {
   address:    string;
@@ -18,9 +18,10 @@ interface MemberEntry {
 }
 
 export default function NewVaultPage() {
-  const router                  = useRouter();
+  const router                   = useRouter();
   const { address, isConnected } = useAccount();
-  const [step, setStep]          = useState<Step>("members");
+  const [step, setStep]          = useState<Step>("name");
+  const [label, setLabel]        = useState("");
   const [members, setMembers]    = useState<MemberEntry[]>([
     { address: address ?? "", percentage: 100 },
   ]);
@@ -29,11 +30,28 @@ export default function NewVaultPage() {
   const [txHash, setTxHash]      = useState<`0x${string}` | undefined>();
 
   const { writeContractAsync } = useWriteContract();
-  const { isLoading: waiting } = useWaitForTransactionReceipt({ hash: txHash });
+  const { isLoading: waiting, isSuccess: txConfirmed } = useWaitForTransactionReceipt({ hash: txHash });
+
+  useEffect(() => {
+    if (txConfirmed) router.push("/dashboard");
+  }, [txConfirmed, router]);
+
+  // ── ENS label availability ──────────────────────────────────────────────────
+
+  const trimmedLabel = label.trim().toLowerCase();
+  const { data: availableRaw, isLoading: checkingAvail } = useReadContract({
+    address:      ADDRESSES.ensManager,
+    abi:          ENS_MANAGER_ABI,
+    functionName: "isLabelAvailable",
+    args:         [trimmedLabel],
+    query:        { enabled: trimmedLabel.length > 0 },
+  });
+  const labelAvailable = availableRaw as boolean | undefined;
+  const labelValid     = trimmedLabel.length > 0 && labelAvailable === true;
 
   const pctSum = members.reduce((a, m) => a + m.percentage, 0);
 
-  // ── Step 1 helpers ─────────────────────────────────────────────────────────
+  // ── Step 1 helpers ──────────────────────────────────────────────────────────
 
   function addMember() {
     setMembers([...members, { address: "", percentage: 0 }]);
@@ -63,7 +81,7 @@ export default function NewVaultPage() {
     members.every((m) => isAddress(m.address) && m.percentage > 0) &&
     new Set(members.map((m) => m.address.toLowerCase())).size === members.length;
 
-  // ── Deploy ─────────────────────────────────────────────────────────────────
+  // ── Deploy ──────────────────────────────────────────────────────────────────
 
   async function deploy() {
     setBusy(true);
@@ -75,14 +93,10 @@ export default function NewVaultPage() {
         address:      ADDRESSES.vaultFactory,
         abi:          VAULT_FACTORY_ABI,
         functionName: "createVault",
-        args:         [addrs, pcts, BigInt(votingDuration)],
-        chainId:      sepolia.id,
+        args:         [addrs, pcts, BigInt(votingDuration), trimmedLabel],
+        chain:        sepolia,
       });
       setTxHash(tx);
-
-      // Wait for mining then navigate (wagmi watches the tx hash)
-      await new Promise((r) => setTimeout(r, 8000));
-      router.push("/dashboard");
     } catch (e) {
       console.error(e);
       setBusy(false);
@@ -97,18 +111,21 @@ export default function NewVaultPage() {
     );
   }
 
+  const STEPS: Step[] = ["name", "members", "duration", "review"];
+  const STEP_LABELS   = { name: "Name", members: "Members", duration: "Voting", review: "Review" };
+
   return (
     <div className="max-w-xl mx-auto flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-bold">Create a Vault</h1>
         <p className="text-gray-400 text-sm mt-1">
-          Set up members, shares, and voting rules. One transaction deploys everything.
+          Choose a name, set up members, shares, and voting rules. One transaction deploys everything.
         </p>
       </div>
 
       {/* Step indicator */}
       <div className="flex items-center gap-2 text-sm">
-        {(["members", "duration", "review"] as Step[]).map((s, i) => (
+        {STEPS.map((s, i) => (
           <div key={s} className="flex items-center gap-2">
             <div className={`w-6 h-6 rounded-full text-xs flex items-center justify-center font-bold ${
               step === s ? "bg-indigo-600 text-white" : "bg-gray-800 text-gray-400"
@@ -116,12 +133,60 @@ export default function NewVaultPage() {
               {i + 1}
             </div>
             <span className={step === s ? "text-white" : "text-gray-500"}>
-              {s === "members" ? "Members" : s === "duration" ? "Voting" : "Review"}
+              {STEP_LABELS[s]}
             </span>
-            {i < 2 && <span className="text-gray-700">→</span>}
+            {i < STEPS.length - 1 && <span className="text-gray-700">→</span>}
           </div>
         ))}
       </div>
+
+      {/* ── Step 0: Name ── */}
+      {step === "name" && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 flex flex-col gap-4">
+          <div>
+            <h2 className="font-semibold">Vault Name</h2>
+            <p className="text-sm text-gray-400 mt-1">
+              Choose a unique ENS subdomain for this vault. It will be registered as{" "}
+              <span className="font-mono text-indigo-400">
+                {trimmedLabel || "yourname"}.vaulthack.eth
+              </span>
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2 items-center">
+              <input
+                type="text"
+                placeholder="e.g. teamvault"
+                value={label}
+                onChange={(e) => setLabel(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                className="flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm focus:outline-none focus:border-indigo-500 font-mono"
+              />
+              <span className="text-gray-500 text-sm whitespace-nowrap">.vaulthack.eth</span>
+            </div>
+
+            {trimmedLabel.length > 0 && (
+              <p className="text-xs pl-1">
+                {checkingAvail ? (
+                  <span className="text-gray-500">Checking availability…</span>
+                ) : labelAvailable === true ? (
+                  <span className="text-green-400">Available</span>
+                ) : labelAvailable === false ? (
+                  <span className="text-red-400">Already taken</span>
+                ) : null}
+              </p>
+            )}
+          </div>
+
+          <button
+            onClick={() => setStep("members")}
+            disabled={!labelValid}
+            className="mt-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors self-end"
+          >
+            Next →
+          </button>
+        </div>
+      )}
 
       {/* ── Step 1: Members ── */}
       {step === "members" && (
@@ -163,10 +228,7 @@ export default function NewVaultPage() {
           ))}
 
           <div className="flex items-center justify-between pt-1">
-            <button
-              onClick={addMember}
-              className="text-sm text-indigo-400 hover:underline"
-            >
+            <button onClick={addMember} className="text-sm text-indigo-400 hover:underline">
               + Add member
             </button>
             <span className={`text-sm font-medium ${pctSum === 100 ? "text-green-400" : "text-red-400"}`}>
@@ -174,13 +236,18 @@ export default function NewVaultPage() {
             </span>
           </div>
 
-          <button
-            onClick={() => setStep("duration")}
-            disabled={!membersValid}
-            className="mt-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors self-end"
-          >
-            Next →
-          </button>
+          <div className="flex gap-3 self-end">
+            <button onClick={() => setStep("name")} className="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-sm transition-colors">
+              ← Back
+            </button>
+            <button
+              onClick={() => setStep("duration")}
+              disabled={!membersValid}
+              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+            >
+              Next →
+            </button>
+          </div>
         </div>
       )}
 
@@ -222,6 +289,11 @@ export default function NewVaultPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 flex flex-col gap-5">
           <h2 className="font-semibold">Review & Deploy</h2>
 
+          <div className="flex justify-between text-sm border-b border-gray-800 pb-3">
+            <span className="text-gray-400">ENS name</span>
+            <span className="font-mono text-indigo-400">{trimmedLabel}.vaulthack.eth</span>
+          </div>
+
           <div>
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Members</p>
             <div className="flex flex-col gap-1">
@@ -250,8 +322,10 @@ export default function NewVaultPage() {
           </div>
 
           <div className="text-xs text-gray-500 bg-gray-800 rounded-lg p-3">
-            This will deploy a SplitVault + MemberDAO in a single transaction. The DAO immediately
-            becomes the vault owner — all future changes require a governance vote.
+            This will deploy a SplitVault + MemberDAO and register{" "}
+            <span className="font-mono text-indigo-400">{trimmedLabel}.vaulthack.eth</span>{" "}
+            in a single transaction. The DAO immediately becomes the vault owner — all future
+            changes require a governance vote.
           </div>
 
           <div className="flex gap-3 self-end">

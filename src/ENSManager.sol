@@ -5,16 +5,17 @@ pragma solidity ^0.8.24;
 /// @notice Manages ENS subdomain registration for SplitVault members.
 ///
 /// Separation of concerns:
-///   SplitVault  → holds ETH, tracks shares
+///   SplitVault  → holds USDC, tracks shares
 ///   MemberDAO   → governance (voting)
 ///   ENSManager  → naming (this contract)
 ///
-/// Setup (before transferring vault ownership to DAO):
-///   1. Register a parent ENS name off-chain (e.g. "myvault.eth").
+/// Setup:
+///   1. Register a parent ENS name off-chain (e.g. "vaulthack.eth").
 ///   2. Transfer ownership of that name to this contract in the ENS registry.
-///   3. Deploy ENSManager(registry, resolver, namehash("myvault.eth")).
-///   4. Call bootstrapSubnames([addr0, addr1, ...], ["alice", "bob", ...]) for initial members.
-///   5. Call setAuthorizedCaller(address(dao)) so the DAO can register future members.
+///   3. Deploy ENSManager(registry, resolver, namehash("vaulthack.eth")).
+///   4. Deploy VaultFactory(token, registry, address(this)).
+///   5. addAuthorizedCaller(address(factory)) — factory registers vault names.
+///   6. After each vault is created, addAuthorizedCaller(daoAddr) — DAO registers member names.
 ///
 /// Registry addresses:
 ///   ENS Registry  (mainnet + Sepolia): 0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e
@@ -22,7 +23,6 @@ pragma solidity ^0.8.24;
 ///   Public Resolver (mainnet):         0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63
 
 interface IENSRegistry {
-    /// @dev Creates or updates a subnode, setting owner, resolver and TTL atomically.
     function setSubnodeRecord(
         bytes32 node,
         bytes32 label,
@@ -30,10 +30,12 @@ interface IENSRegistry {
         address resolver,
         uint64  ttl
     ) external;
+
+    /// @dev Returns the owner of a node (address(0) = unregistered).
+    function owner(bytes32 node) external view returns (address);
 }
 
 interface IPublicResolver {
-    /// @dev Points an ENS node to an Ethereum address.
     function setAddr(bytes32 node, address addr) external;
 }
 
@@ -44,20 +46,22 @@ contract ENSManager {
 
     IENSRegistry    public immutable ensRegistry;
     IPublicResolver public immutable publicResolver;
-    /// @dev namehash of the vault's parent ENS name (e.g. namehash("myvault.eth")).
+    /// @dev namehash of the vault's parent ENS name (e.g. namehash("vaulthack.eth")).
     ///      This contract must own that name in the ENS registry.
     bytes32         public immutable vaultNode;
 
     address public owner;
-    /// @dev Address allowed to call registerSubname — set to the MemberDAO after deployment.
-    address public authorizedCaller;
+
+    /// @dev Addresses allowed to call registerSubname (factory + DAOs).
+    mapping(address => bool) public authorizedCallers;
 
     // -------------------------------------------------------------------------
     // Events
     // -------------------------------------------------------------------------
 
     event SubnameRegistered(address indexed addr, string label);
-    event AuthorizedCallerSet(address indexed caller);
+    event AuthorizedCallerAdded(address indexed caller);
+    event AuthorizedCallerRemoved(address indexed caller);
 
     // -------------------------------------------------------------------------
     // Errors
@@ -67,6 +71,7 @@ contract ENSManager {
     error NotAuthorized();
     error ZeroAddress();
     error BootstrapLengthMismatch();
+    error LabelAlreadyTaken(string label);
 
     // -------------------------------------------------------------------------
     // Modifiers
@@ -77,9 +82,9 @@ contract ENSManager {
         _;
     }
 
-    /// @dev Owner OR the authorized caller (DAO) may register subnames.
+    /// @dev Owner OR any authorized caller (factory, DAO) may register subnames.
     modifier onlyAuthorized() {
-        if (msg.sender != owner && msg.sender != authorizedCaller) revert NotAuthorized();
+        if (msg.sender != owner && !authorizedCallers[msg.sender]) revert NotAuthorized();
         _;
     }
 
@@ -87,9 +92,6 @@ contract ENSManager {
     // Constructor
     // -------------------------------------------------------------------------
 
-    /// @param registry  ENS Registry address.
-    /// @param resolver  Public Resolver address.
-    /// @param node      namehash of the vault's parent ENS name.
     constructor(address registry, address resolver, bytes32 node) {
         if (registry == address(0)) revert ZeroAddress();
         ensRegistry    = IENSRegistry(registry);
@@ -102,12 +104,17 @@ contract ENSManager {
     // Configuration
     // -------------------------------------------------------------------------
 
-    /// @notice Authorizes an address (typically the MemberDAO) to register subnames.
-    ///         Must be called after the DAO is deployed, before transferring vault ownership.
-    function setAuthorizedCaller(address caller) external onlyOwner {
+    /// @notice Grants an address (factory or DAO) permission to register subnames.
+    function addAuthorizedCaller(address caller) external onlyOwner {
         if (caller == address(0)) revert ZeroAddress();
-        authorizedCaller = caller;
-        emit AuthorizedCallerSet(caller);
+        authorizedCallers[caller] = true;
+        emit AuthorizedCallerAdded(caller);
+    }
+
+    /// @notice Revokes a previously granted caller's permission.
+    function removeAuthorizedCaller(address caller) external onlyOwner {
+        authorizedCallers[caller] = false;
+        emit AuthorizedCallerRemoved(caller);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -116,21 +123,30 @@ contract ENSManager {
     }
 
     // -------------------------------------------------------------------------
+    // Availability
+    // -------------------------------------------------------------------------
+
+    /// @notice Returns true if the label is not yet registered under vaultNode.
+    function isLabelAvailable(string calldata label) external view returns (bool) {
+        bytes32 labelHash   = keccak256(bytes(label));
+        bytes32 subnodeHash = keccak256(abi.encodePacked(vaultNode, labelHash));
+        return ensRegistry.owner(subnodeHash) == address(0);
+    }
+
+    // -------------------------------------------------------------------------
     // Subname registration
     // -------------------------------------------------------------------------
 
-    /// @notice Registers a subdomain for a newly added vault member.
-    ///         Called by MemberDAO after a successful AddMember proposal.
-    /// @param addr   The new member's wallet address.
-    /// @param label  The subdomain label (e.g. "alice" → "alice.myvault.eth").
+    /// @notice Registers a subdomain pointing to `addr`.
+    ///         Called by the factory (for vault names) and by MemberDAO (for member names).
+    /// @param addr   The address the subdomain should resolve to.
+    /// @param label  The subdomain label (e.g. "teamvault" or "alice").
     function registerSubname(address addr, string calldata label) external onlyAuthorized {
         _register(addr, label);
     }
 
     /// @notice Registers subnames for the vault's initial members in a single call.
     ///         Must be called by the owner before handing control to the DAO.
-    /// @param addrs   Ordered list of member addresses (same order as SplitVault.members).
-    /// @param labels  Corresponding subdomain labels.
     function bootstrapSubnames(
         address[] calldata addrs,
         string[]  calldata labels
@@ -145,25 +161,23 @@ contract ENSManager {
     // Internal
     // -------------------------------------------------------------------------
 
-    /// @dev Computes the subnode hash, calls setSubnodeRecord on the ENS registry,
-    ///      then sets the addr record in the public resolver.
     function _register(address addr, string memory label) internal {
         bytes32 labelHash   = keccak256(bytes(label));
         bytes32 subnodeHash = keccak256(abi.encodePacked(vaultNode, labelHash));
 
-        // Step 1: create the subnode with ENSManager as owner so we are
-        //         authorised to write records into the resolver.
+        // Revert if this label is already taken
+        if (ensRegistry.owner(subnodeHash) != address(0)) revert LabelAlreadyTaken(label);
+
+        // Step 1: create the subnode owned by ENSManager so we can write resolver records
         ensRegistry.setSubnodeRecord(
             vaultNode,
             labelHash,
-            address(this),          // ENSManager owns the subnode temporarily
+            address(this),
             address(publicResolver),
             0
         );
 
-        // Step 2: point the addr record to the member's wallet.
-        //         The resolver checks owner == msg.sender, so this must happen
-        //         while ENSManager is still the owner.
+        // Step 2: point the addr record to the target address
         if (address(publicResolver) != address(0)) {
             publicResolver.setAddr(subnodeHash, addr);
         }

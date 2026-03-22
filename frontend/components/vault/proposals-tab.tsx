@@ -1,7 +1,9 @@
 "use client";
 
 import { useState }    from "react";
-import { useWriteContract } from "wagmi";
+import { useWriteContract, useEnsAddress } from "wagmi";
+import { isAddress } from "viem";
+import { mainnet } from "wagmi/chains";
 import { useProposals, useProposalCount, useHasVoted, type Proposal } from "@/hooks/useProposals";
 import { useVaultMembers } from "@/hooks/useVaults";
 import { useIsCorrectNetwork } from "@/components/network-guard";
@@ -135,7 +137,7 @@ function ProposalCard({
         abi:          MEMBER_DAO_ABI,
         functionName: "vote",
         args:         [BigInt(proposal.id), support],
-        chainId:      sepolia.id,
+        chain:        sepolia,
       });
       await new Promise((r) => setTimeout(r, 4000));
       onAction();
@@ -151,7 +153,7 @@ function ProposalCard({
         abi:          MEMBER_DAO_ABI,
         functionName: "executeProposal",
         args:         [BigInt(proposal.id)],
-        chainId:      sepolia.id,
+        chain:        sepolia,
       });
       await new Promise((r) => setTimeout(r, 4000));
       onAction();
@@ -234,7 +236,7 @@ function ProposalForm({
   onSuccess:  () => void;
 }) {
   const [type, setType]           = useState<"addMember" | "repartition">("addMember");
-  const [newAddr, setNewAddr]     = useState("");
+  const [rawInput, setRawInput]   = useState("");
   const [label, setLabel]         = useState("");
   const [percentages, setPercentages] = useState<string[]>(
     () => members.map((m) => m.percentage.toString())
@@ -242,6 +244,17 @@ function ProposalForm({
   const [newPct, setNewPct]       = useState("0");
   const [busy, setBusy]           = useState(false);
   const { writeContractAsync }    = useWriteContract();
+
+  const looksLikeEns = rawInput.includes(".") && !isAddress(rawInput);
+  const { data: ensResolved, isLoading: ensLoading } = useEnsAddress({
+    name:    looksLikeEns ? rawInput : undefined,
+    chainId: mainnet.id,
+    query:   { enabled: looksLikeEns },
+  });
+
+  const resolvedAddr: string = isAddress(rawInput)
+    ? rawInput
+    : (ensResolved ?? "");
 
   const allPcts = type === "addMember"
     ? [...percentages, newPct]
@@ -258,8 +271,8 @@ function ProposalForm({
           address:      daoAddress,
           abi:          MEMBER_DAO_ABI,
           functionName: "proposeMember",
-          args:         [newAddr as `0x${string}`, pctsBig, label],
-          chainId:      sepolia.id,
+          args:         [resolvedAddr as `0x${string}`, pctsBig, label],
+          chain:        sepolia,
         });
       } else {
         await writeContractAsync({
@@ -267,7 +280,7 @@ function ProposalForm({
           abi:          MEMBER_DAO_ABI,
           functionName: "proposeRepartition",
           args:         [pctsBig],
-          chainId:      sepolia.id,
+          chain:        sepolia,
         });
       }
       await new Promise((r) => setTimeout(r, 4000));
@@ -297,21 +310,34 @@ function ProposalForm({
 
       {/* New member inputs */}
       {type === "addMember" && (
-        <div className="flex gap-2">
-          <input
-            type="text"
-            placeholder="New member address (0x…)"
-            value={newAddr}
-            onChange={(e) => setNewAddr(e.target.value)}
-            className="flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm focus:outline-none focus:border-indigo-500"
-          />
-          <input
-            type="text"
-            placeholder="ENS label (optional)"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            className="w-36 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm focus:outline-none focus:border-indigo-500"
-          />
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="Address (0x…) or ENS name (alice.eth)"
+              value={rawInput}
+              onChange={(e) => setRawInput(e.target.value)}
+              className="flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm focus:outline-none focus:border-indigo-500"
+            />
+            <input
+              type="text"
+              placeholder="ENS label (optional)"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              className="w-36 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          {looksLikeEns && (
+            <p className="text-xs pl-1">
+              {ensLoading ? (
+                <span className="text-gray-500">Resolving…</span>
+              ) : resolvedAddr ? (
+                <span className="text-green-400 font-mono">{resolvedAddr}</span>
+              ) : (
+                <span className="text-red-400">ENS name not found</span>
+              )}
+            </p>
+          )}
         </div>
       )}
 
@@ -354,7 +380,7 @@ function ProposalForm({
 
       <button
         onClick={submit}
-        disabled={busy || sum !== 100}
+        disabled={busy || sum !== 100 || (type === "addMember" && !isAddress(resolvedAddr))}
         className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors self-end"
       >
         {busy ? "Submitting…" : "Submit Proposal"}

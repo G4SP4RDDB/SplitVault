@@ -63,7 +63,7 @@ export function OverviewTab({ vaultAddress, wallet, isMember }: Props) {
           abi:          ERC20_ABI,
           functionName: "approve",
           args:         [vaultAddress, amount],
-          chainId:      sepolia.id,
+          chain:        sepolia,
         });
         setTxHash(approveTx);
         // Wait for approval
@@ -76,7 +76,7 @@ export function OverviewTab({ vaultAddress, wallet, isMember }: Props) {
         abi:          SPLIT_VAULT_ABI,
         functionName: "deposit",
         args:         [amount],
-        chainId:      sepolia.id,
+        chain:        sepolia,
       });
       setTxHash(depositTx);
       await new Promise((r) => setTimeout(r, 4000));
@@ -97,7 +97,7 @@ export function OverviewTab({ vaultAddress, wallet, isMember }: Props) {
         address:      vaultAddress,
         abi:          SPLIT_VAULT_ABI,
         functionName: "distribute",
-        chainId:      sepolia.id,
+        chain:        sepolia,
       });
       setTxHash(tx);
       await new Promise((r) => setTimeout(r, 4000));

@@ -2,8 +2,9 @@ import abis from "./abis.json";
 
 // ── Sepolia addresses ─────────────────────────────────────────────────────────
 export const ADDRESSES = {
-  vaultRegistry: "0x03c2841ABfB101B521A9b1c5BbE122A5ea20AE20" as `0x${string}`,
-  vaultFactory:  "0x943b0b26c3fF2a7f60503fC65A0eD87Bf4DDeE7c" as `0x${string}`,
+  vaultRegistry: "0xF21FE8FBAcF07f05F89F8bf3FdF5Ef2474229bf0" as `0x${string}`,
+  vaultFactory:  "0x4Af75Daf65Fb4E59DAb1d2cd5f40Aa63E82804Be" as `0x${string}`,
+  ensManager:    "0xb2E90307A66f1E26cab830959A181c4Dfd69D150" as `0x${string}`,
   usdc:          "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238" as `0x${string}`,
 } as const;
 

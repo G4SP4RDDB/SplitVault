@@ -27,52 +27,31 @@ contract Deploy is Script {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerKey);
 
-        // ── 1. Infrastructure ──────────────────────────────────────────────
-
-        VaultRegistry registry = new VaultRegistry();
-        console.log("VaultRegistry :", address(registry));
-
-        VaultFactory factory = new VaultFactory(USDC, address(registry));
-        console.log("VaultFactory  :", address(factory));
-
-        // ── 2. Demo vault via factory (alice 50%, bob 30%, charlie 20%) ────
-
-        address[] memory addrs = new address[](3);
-        uint256[] memory pcts  = new uint256[](3);
-        addrs[0] = ALICE;   pcts[0] = 50;
-        addrs[1] = BOB;     pcts[1] = 30;
-        addrs[2] = CHARLIE; pcts[2] = 20;
-
-        (address vaultAddr, address daoAddr) =
-            factory.createVault(addrs, pcts, 1 days);
-
-        console.log("SplitVault    :", vaultAddr);
-        console.log("MemberDAO     :", daoAddr);
-
-        // ── 3. ENSManager for vaulthack.eth (advanced, optional) ──────────
+        // ── 1. ENSManager ────────────────────────────────────────────────
+        // Deploy first. After this script, call:
+        //   cast send <BaseRegistrar> "reclaim(uint256,address)" <tokenId> <ensManagerAddr>
+        // to hand vaulthack.eth ownership to this contract before creating vaults.
 
         ENSManager ens = new ENSManager(ENS_REGISTRY, ENS_RESOLVER, VAULT_NODE);
         console.log("ENSManager    :", address(ens));
 
-        // Wire ENSManager: DAO is authorized caller, creator keeps ENS ownership
-        ens.setAuthorizedCaller(daoAddr);
+        // ── 2. Registry + Factory ─────────────────────────────────────────
 
-        // Attach ENSManager to the DAO (any member can call setENSManager)
-        // We use alice's key — alice is a member
-        vm.stopBroadcast();
-        uint256 aliceKey = vm.envUint("ALICE_PK");
-        vm.startBroadcast(aliceKey);
-        MemberDAO(daoAddr).setENSManager(address(ens));
-        vm.stopBroadcast();
+        VaultRegistry registry = new VaultRegistry();
+        console.log("VaultRegistry :", address(registry));
 
-        vm.startBroadcast(deployerKey);
+        VaultFactory factory = new VaultFactory(USDC, address(registry), address(ens));
+        console.log("VaultFactory  :", address(factory));
 
-        // ── 4. Sanity checks ──────────────────────────────────────────────
+        // ── 3. Authorize factory ──────────────────────────────────────────
+        // ENSManager needs to own vaulthack.eth before this call is useful,
+        // but we can pre-authorize the factory now so it's ready.
+
+        ens.addAuthorizedCaller(address(factory));
+
         console.log("---");
-        console.log("Vault in registry      :", registry.isRegistered(vaultAddr));
-        console.log("Vault owned by DAO     :", SplitVault(vaultAddr).owner() == daoAddr);
-        console.log("ENS auth caller is DAO :", ens.authorizedCaller() == daoAddr);
-        console.log("DAO ensManager set     :", address(MemberDAO(daoAddr).ensManager()) == address(ens));
+        console.log("Factory authorized:", ens.authorizedCallers(address(factory)));
+        console.log("ENS label available (demo):", ens.isLabelAvailable("demo"));
 
         vm.stopBroadcast();
     }

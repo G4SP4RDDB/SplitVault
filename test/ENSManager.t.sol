@@ -23,6 +23,9 @@ contract MockENSRegistry {
     address public lastOwner;
     address public lastResolver;
 
+    /// @dev node → owner (address(0) = unregistered)
+    mapping(bytes32 => address) private _owners;
+
     function setSubnodeRecord(
         bytes32 node,
         bytes32 label,
@@ -30,10 +33,16 @@ contract MockENSRegistry {
         address resolver,
         uint64
     ) external {
+        bytes32 subnode = keccak256(abi.encodePacked(node, label));
+        _owners[subnode] = owner_;
         lastNode     = node;
         lastLabel    = label;
         lastOwner    = owner_;
         lastResolver = resolver;
+    }
+
+    function owner(bytes32 node) external view returns (address) {
+        return _owners[node];
     }
 }
 
@@ -61,6 +70,7 @@ contract ENSManagerTest is Test {
     address bob      = makeAddr("bob");
     address charlie  = makeAddr("charlie");
     address dao      = makeAddr("dao");
+    address factory  = makeAddr("factory");
 
     bytes32 constant VAULT_NODE = keccak256("myvault.eth");
 
@@ -89,28 +99,56 @@ contract ENSManagerTest is Test {
     }
 
     // =========================================================================
-    // setAuthorizedCaller
+    // addAuthorizedCaller / removeAuthorizedCaller
     // =========================================================================
 
-    function test_SetAuthorizedCaller() public {
+    function test_AddAuthorizedCaller() public {
         vm.prank(owner);
         vm.expectEmit(true, false, false, false);
-        emit ENSManager.AuthorizedCallerSet(dao);
+        emit ENSManager.AuthorizedCallerAdded(dao);
 
-        ens.setAuthorizedCaller(dao);
-        assertEq(ens.authorizedCaller(), dao);
+        ens.addAuthorizedCaller(dao);
+        assertTrue(ens.authorizedCallers(dao));
     }
 
-    function test_RevertIf_SetAuthorizedCaller_NotOwner() public {
+    function test_AddAuthorizedCaller_MultipleCallers() public {
+        vm.prank(owner);
+        ens.addAuthorizedCaller(dao);
+        vm.prank(owner);
+        ens.addAuthorizedCaller(factory);
+
+        assertTrue(ens.authorizedCallers(dao));
+        assertTrue(ens.authorizedCallers(factory));
+    }
+
+    function test_RemoveAuthorizedCaller() public {
+        vm.prank(owner);
+        ens.addAuthorizedCaller(dao);
+
+        vm.prank(owner);
+        vm.expectEmit(true, false, false, false);
+        emit ENSManager.AuthorizedCallerRemoved(dao);
+
+        ens.removeAuthorizedCaller(dao);
+        assertFalse(ens.authorizedCallers(dao));
+    }
+
+    function test_RevertIf_AddAuthorizedCaller_NotOwner() public {
         vm.prank(alice);
         vm.expectRevert(ENSManager.NotOwner.selector);
-        ens.setAuthorizedCaller(dao);
+        ens.addAuthorizedCaller(dao);
     }
 
-    function test_RevertIf_SetAuthorizedCaller_ZeroAddress() public {
+    function test_RevertIf_AddAuthorizedCaller_ZeroAddress() public {
         vm.prank(owner);
         vm.expectRevert(ENSManager.ZeroAddress.selector);
-        ens.setAuthorizedCaller(address(0));
+        ens.addAuthorizedCaller(address(0));
+    }
+
+    function test_RevertIf_RemoveAuthorizedCaller_NotOwner() public {
+        vm.prank(alice);
+        vm.expectRevert(ENSManager.NotOwner.selector);
+        ens.removeAuthorizedCaller(dao);
     }
 
     // =========================================================================
@@ -136,6 +174,26 @@ contract ENSManagerTest is Test {
     }
 
     // =========================================================================
+    // isLabelAvailable
+    // =========================================================================
+
+    function test_IsLabelAvailable_True_WhenNotRegistered() public view {
+        assertTrue(ens.isLabelAvailable("alice"));
+    }
+
+    function test_IsLabelAvailable_False_AfterRegistration() public {
+        vm.prank(owner);
+        ens.registerSubname(alice, "alice");
+        assertFalse(ens.isLabelAvailable("alice"));
+    }
+
+    function test_IsLabelAvailable_IndependentLabels() public {
+        vm.prank(owner);
+        ens.registerSubname(alice, "alice");
+        assertTrue(ens.isLabelAvailable("bob")); // different label stays available
+    }
+
+    // =========================================================================
     // registerSubname
     // =========================================================================
 
@@ -151,7 +209,7 @@ contract ENSManagerTest is Test {
 
         assertEq(reg.lastNode(),     VAULT_NODE);
         assertEq(reg.lastLabel(),    labelHash);
-        assertEq(reg.lastOwner(),    address(ens)); // ENSManager keeps ownership to authorize setAddr
+        assertEq(reg.lastOwner(),    address(ens));
         assertEq(reg.lastResolver(), address(res));
         assertEq(res.lastNode(),     subnodeHash);
         assertEq(res.lastAddr(),     alice);
@@ -159,7 +217,7 @@ contract ENSManagerTest is Test {
 
     function test_RegisterSubname_ByAuthorizedCaller() public {
         vm.prank(owner);
-        ens.setAuthorizedCaller(dao);
+        ens.addAuthorizedCaller(dao);
 
         vm.prank(dao);
         ens.registerSubname(bob, "bob");
@@ -167,10 +225,29 @@ contract ENSManagerTest is Test {
         assertEq(reg.lastOwner(), address(ens));
     }
 
+    function test_RegisterSubname_ByFactory() public {
+        vm.prank(owner);
+        ens.addAuthorizedCaller(factory);
+
+        vm.prank(factory);
+        ens.registerSubname(makeAddr("vault"), "teamvault");
+
+        assertEq(reg.lastOwner(), address(ens));
+    }
+
     function test_RevertIf_RegisterSubname_Unauthorized() public {
-        vm.prank(alice); // not owner, not authorized caller
+        vm.prank(alice);
         vm.expectRevert(ENSManager.NotAuthorized.selector);
         ens.registerSubname(alice, "alice");
+    }
+
+    function test_RevertIf_RegisterSubname_LabelAlreadyTaken() public {
+        vm.prank(owner);
+        ens.registerSubname(alice, "alice");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ENSManager.LabelAlreadyTaken.selector, "alice"));
+        ens.registerSubname(bob, "alice"); // same label
     }
 
     // =========================================================================
@@ -187,9 +264,8 @@ contract ENSManagerTest is Test {
         vm.prank(owner);
         ens.bootstrapSubnames(addrs, labels);
 
-        // Last registered: charlie
         bytes32 charlieHash = keccak256(bytes("charlie"));
-        assertEq(reg.lastOwner(), address(ens)); // ENSManager keeps ownership to authorize setAddr
+        assertEq(reg.lastOwner(), address(ens));
         assertEq(reg.lastLabel(), charlieHash);
     }
 
@@ -238,7 +314,6 @@ contract ENSManagerIntegrationTest is Test {
     uint256[] davePcts;
 
     function setUp() public {
-        // Deploy token + vault: alice 50%, bob 30%, charlie 20%
         usdc = new MockUSDC();
         address[] memory addrs = new address[](3);
         uint256[] memory pcts  = new uint256[](3);
@@ -247,16 +322,13 @@ contract ENSManagerIntegrationTest is Test {
         addrs[2] = charlie; pcts[2] = 20;
         vault = new SplitVault(address(usdc), addrs, pcts);
 
-        // Deploy ENS mocks + manager
         reg = new MockENSRegistry();
         res = new MockPublicResolver();
         ens = new ENSManager(address(reg), address(res), VAULT_NODE);
 
-        // Deploy DAO wired to ENSManager
         daoContract = new MemberDAO(payable(address(vault)), VOTING_DURATION, address(ens));
 
-        // Authorize DAO to register subnames, then hand vault ownership to DAO
-        ens.setAuthorizedCaller(address(daoContract));
+        ens.addAuthorizedCaller(address(daoContract));
         vault.transferOwnership(address(daoContract));
 
         davePcts = new uint256[](4);
@@ -264,15 +336,12 @@ contract ENSManagerIntegrationTest is Test {
     }
 
     function test_FullFlow_AddMember_RegistersSubname() public {
-        // Propose adding dave with label "dave"
         vm.prank(alice);
         uint256 id = daoContract.proposeMember(dave, davePcts, "dave");
 
-        // alice + bob vote yes (2/3 = quorum)
         vm.prank(alice); daoContract.vote(id, true);
         vm.prank(bob);   daoContract.vote(id, true);
 
-        // Warp past deadline and execute
         vm.warp(block.timestamp + VOTING_DURATION + 1);
 
         vm.expectEmit(true, false, false, true);
@@ -280,22 +349,19 @@ contract ENSManagerIntegrationTest is Test {
 
         daoContract.executeProposal(id);
 
-        // Dave is now in the vault
         (address[] memory members,) = vault.getMembers();
         assertEq(members.length, 4);
         assertEq(members[3], dave);
 
-        // ENS registry was called with the correct data
         bytes32 expectedLabel   = keccak256(bytes("dave"));
         bytes32 expectedSubnode = keccak256(abi.encodePacked(VAULT_NODE, expectedLabel));
-        assertEq(reg.lastOwner(), address(ens)); // ENSManager keeps ownership to authorize setAddr
+        assertEq(reg.lastOwner(), address(ens));
         assertEq(reg.lastLabel(), expectedLabel);
         assertEq(res.lastNode(),  expectedSubnode);
         assertEq(res.lastAddr(),  dave);
     }
 
     function test_Repartition_DoesNotCallENS() public {
-        // Repartition proposals must NOT trigger ENS registration
         uint256[] memory newPcts = new uint256[](3);
         newPcts[0] = 60; newPcts[1] = 25; newPcts[2] = 15;
 
@@ -308,19 +374,10 @@ contract ENSManagerIntegrationTest is Test {
         vm.warp(block.timestamp + VOTING_DURATION + 1);
         daoContract.executeProposal(id);
 
-        // Shares updated — ENS registry was never called (lastOwner stays zero)
         assertEq(reg.lastOwner(), address(0));
     }
 
     function test_AddMember_NoENS_WhenManagerNotSet() public {
-        // Deploy a DAO without an ENSManager
-        MemberDAO daoNoENS = new MemberDAO(
-            payable(address(vault)),
-            VOTING_DURATION,
-            address(0)  // no ENS
-        );
-        // (vault is already owned by daoContract — we're just testing the no-ENS branch in isolation
-        //  so we deploy a fresh vault for this test)
         address[] memory addrs2 = new address[](3);
         uint256[] memory pcts2  = new uint256[](3);
         addrs2[0] = alice; pcts2[0] = 50;
@@ -338,12 +395,11 @@ contract ENSManagerIntegrationTest is Test {
         vm.prank(bob);   daoNoEns2.vote(id, true);
 
         vm.warp(block.timestamp + VOTING_DURATION + 1);
-        daoNoEns2.executeProposal(id); // must not revert
+        daoNoEns2.executeProposal(id);
 
         (address[] memory members,) = vault2.getMembers();
         assertEq(members.length, 4);
         assertEq(members[3], dave);
-        // ENS registry was never touched
         assertEq(reg.lastOwner(), address(0));
     }
 }

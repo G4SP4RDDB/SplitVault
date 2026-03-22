@@ -9,6 +9,7 @@ export function useAllVaults() {
     address: ADDRESSES.vaultRegistry,
     abi:     VAULT_REGISTRY_ABI,
     functionName: "getAllVaults",
+    query: { refetchOnMount: true },
   });
 }
 

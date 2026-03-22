@@ -739,6 +739,11 @@
           "name": "_registry",
           "type": "address",
           "internalType": "address"
+        },
+        {
+          "name": "_ensManager",
+          "type": "address",
+          "internalType": "address"
         }
       ],
       "stateMutability": "nonpayable"
@@ -761,6 +766,11 @@
           "name": "votingDuration",
           "type": "uint256",
           "internalType": "uint256"
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "internalType": "string"
         }
       ],
       "outputs": [
@@ -776,6 +786,19 @@
         }
       ],
       "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "ensManager",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "contract IENSManager"
+        }
+      ],
+      "stateMutability": "view"
     },
     {
       "type": "function",
@@ -824,9 +847,20 @@
           "type": "address",
           "indexed": true,
           "internalType": "address"
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "indexed": false,
+          "internalType": "string"
         }
       ],
       "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "EmptyLabel",
+      "inputs": []
     },
     {
       "type": "error",
@@ -947,13 +981,32 @@
     },
     {
       "type": "function",
-      "name": "authorizedCaller",
-      "inputs": [],
-      "outputs": [
+      "name": "addAuthorizedCaller",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "authorizedCallers",
+      "inputs": [
         {
           "name": "",
           "type": "address",
           "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
         }
       ],
       "stateMutability": "view"
@@ -985,6 +1038,25 @@
           "name": "",
           "type": "address",
           "internalType": "contract IENSRegistry"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isLabelAvailable",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "internalType": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
         }
       ],
       "stateMutability": "view"
@@ -1035,7 +1107,7 @@
     },
     {
       "type": "function",
-      "name": "setAuthorizedCaller",
+      "name": "removeAuthorizedCaller",
       "inputs": [
         {
           "name": "caller",
@@ -1074,7 +1146,20 @@
     },
     {
       "type": "event",
-      "name": "AuthorizedCallerSet",
+      "name": "AuthorizedCallerAdded",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "AuthorizedCallerRemoved",
       "inputs": [
         {
           "name": "caller",
@@ -1108,6 +1193,17 @@
       "type": "error",
       "name": "BootstrapLengthMismatch",
       "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "LabelAlreadyTaken",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "internalType": "string"
+        }
+      ]
     },
     {
       "type": "error",
