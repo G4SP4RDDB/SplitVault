@@ -4,6 +4,7 @@ cache/
 
 # Dependencies (reinstalled via forge install)
 lib/
+!frontend/lib/
 
 # Environment
 .env
